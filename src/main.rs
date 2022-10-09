@@ -3,7 +3,7 @@ use fnv::{FnvHashMap as HashMap, FnvHashSet as HashSet};
 use glob::Pattern;
 use regex::Regex;
 use std::collections::hash_map::Entry;
-use std::fs::{File, Metadata};
+use std::fs::{File, Metadata, self};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -222,6 +222,11 @@ struct Args {
     )]
     nul: bool,
     #[structopt(
+        short = "d",
+        help = "With -s, separate dupes with NUL, replace newline with two NULs"
+    )]
+    deldup: bool,
+    #[structopt(
         short = "f",
         help = "Check only filenames matching this pattern",
         group = "patterns"
@@ -255,6 +260,7 @@ fn main() {
         nohidden,
         nonrecursive,
         nul,
+        deldup,
         pattern,
         regexp,
         roots,
@@ -415,8 +421,18 @@ fn main() {
                 }
             } else {
                 writeln!(out, "Size {} bytes:", size).unwrap();
-                for path in entries {
-                    writeln!(out, "    {}", path.display()).unwrap();
+
+                for (i, path) in entries.iter().enumerate() {
+                    if i == 0 {
+                        writeln!(out, "      {}", path.display()).unwrap();
+                    } else {
+                        if deldup {
+                            writeln!(out, " del: {}", path.display()).unwrap();
+                            fs::remove_file(path).expect("File delete failed");
+                        } else {
+                            writeln!(out, " dup: {}", path.display()).unwrap();
+                        }
+                    }
                 }
             }
 
