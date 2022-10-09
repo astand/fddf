@@ -1,16 +1,16 @@
-use std::fs::{File, Metadata};
-use std::io::{self, Read, Write, Seek, SeekFrom};
-use std::path::PathBuf;
-use std::sync::mpsc::{Sender, channel};
-use std::collections::hash_map::Entry;
-use structopt::StructOpt;
-use fnv::{FnvHashMap as HashMap, FnvHashSet as HashSet};
 use blake3::Hasher;
-use walkdir::{DirEntry, WalkDir};
+use fnv::{FnvHashMap as HashMap, FnvHashSet as HashSet};
+use glob::Pattern;
+use regex::Regex;
+use std::collections::hash_map::Entry;
+use std::fs::{File, Metadata};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
-use regex::Regex;
-use glob::Pattern;
+use std::path::PathBuf;
+use std::sync::mpsc::{channel, Sender};
+use structopt::StructOpt;
+use walkdir::{DirEntry, WalkDir};
 
 fn err(path: &PathBuf, err: io::Error) {
     eprintln!("Error processing file {}: {}", path.display(), err);
@@ -71,8 +71,14 @@ struct SlowCandidate {
 impl Candidate for FastCandidate {
     fn read_block(&mut self) -> Result<usize, ()> {
         match self.file.read(&mut self.buf) {
-            Ok(n) => { self.n = n; Ok(n) },
-            Err(e) => { err(&self.path, e); Err(()) }
+            Ok(n) => {
+                self.n = n;
+                Ok(n)
+            }
+            Err(e) => {
+                err(&self.path, e);
+                Err(())
+            }
         }
     }
 
@@ -88,12 +94,18 @@ impl Candidate for FastCandidate {
 impl Candidate for SlowCandidate {
     fn read_block(&mut self) -> Result<usize, ()> {
         match File::open(&self.path).and_then(|mut f| {
-            f.seek(SeekFrom::Start(self.pos as u64)).and_then(|_| {
-                f.read(&mut self.buf)
-            })
+            f.seek(SeekFrom::Start(self.pos as u64))
+                .and_then(|_| f.read(&mut self.buf))
         }) {
-            Ok(n) => { self.n = n; self.pos += n; Ok(n) },
-            Err(e) => { err(&self.path, e); Err(()) }
+            Ok(n) => {
+                self.n = n;
+                self.pos += n;
+                Ok(n)
+            }
+            Err(e) => {
+                err(&self.path, e);
+                Err(())
+            }
         }
     }
 
@@ -131,13 +143,16 @@ fn compare_files_inner<C: Candidate>(fsize: u64, mut todo: Vec<C>, tx: &DupeSend
                 // If we're at EOF, all remaining are dupes.
                 Ok(0) => break 'outer,
                 // If an error occurs, do not process this file further.
-                Err(_) => { todo.remove(i); }
-                _ => ()
+                Err(_) => {
+                    todo.remove(i);
+                }
+                _ => (),
             }
         }
     }
     // We are finished and have more than one file in the candidate list.
-    tx.send((fsize, todo.into_iter().map(Candidate::into_path).collect())).unwrap();
+    tx.send((fsize, todo.into_iter().map(Candidate::into_path).collect()))
+        .unwrap();
 }
 
 fn compare_files(verbose: bool, fsize: u64, paths: Vec<PathBuf>, tx: DupeSender) {
@@ -149,23 +164,38 @@ fn compare_files(verbose: bool, fsize: u64, paths: Vec<PathBuf>, tx: DupeSender)
     // If there are too many candidates, we cannot process them opening all
     // files at the same time.
     if paths.len() < 100 {
-        let todo = paths.into_iter().filter_map(|p| {
-            match File::open(&p) {
-                Ok(f) => Some(FastCandidate { path: p, file: f, buf: [0u8; BLOCKSIZE], n: 0 }),
-                Err(e) => { err(&p, e); None }
-            }
-        }).collect();
+        let todo = paths
+            .into_iter()
+            .filter_map(|p| match File::open(&p) {
+                Ok(f) => Some(FastCandidate {
+                    path: p,
+                    file: f,
+                    buf: [0u8; BLOCKSIZE],
+                    n: 0,
+                }),
+                Err(e) => {
+                    err(&p, e);
+                    None
+                }
+            })
+            .collect();
         compare_files_inner(fsize, todo, &tx);
     } else {
-        let todo = paths.into_iter().map(|p| {
-            SlowCandidate { path: p, pos: 0, buf: [0u8; BLOCKSIZE], n: 0 }
-        }).collect();
+        let todo = paths
+            .into_iter()
+            .map(|p| SlowCandidate {
+                path: p,
+                pos: 0,
+                buf: [0u8; BLOCKSIZE],
+                n: 0,
+            })
+            .collect();
         compare_files_inner(fsize, todo, &tx);
     }
 }
 
 #[derive(StructOpt)]
-#[structopt(about="A parallel duplicate file finder.")]
+#[structopt(about = "A parallel duplicate file finder.")]
 struct Args {
     #[structopt(short="m", default_value="1", parse(try_from_str=unbytify::unbytify),
                 help="Minimum file size to consider")]
@@ -173,36 +203,62 @@ struct Args {
     #[structopt(short="M", parse(try_from_str=unbytify::unbytify),
                 help="Maximum file size to consider")]
     maxsize: Option<u64>,
-    #[structopt(short="H", help="Exclude Unix hidden files (names starting with dot)")]
+    #[structopt(
+        short = "H",
+        help = "Exclude Unix hidden files (names starting with dot)"
+    )]
     nohidden: bool,
-    #[structopt(short="S", help="Don't scan recursively in directories?")]
+    #[structopt(short = "S", help = "Don't scan recursively in directories?")]
     nonrecursive: bool,
-    #[structopt(short="t", help="Report a grand total of duplicates?")]
+    #[structopt(short = "t", help = "Report a grand total of duplicates?")]
     grandtotal: bool,
-    #[structopt(short="s", help="Report dupes on a single line?")]
+    #[structopt(short = "s", help = "Report dupes on a single line?")]
     singleline: bool,
-    #[structopt(short="v", help="Verbose operation?")]
+    #[structopt(short = "v", help = "Verbose operation?")]
     verbose: bool,
-    #[structopt(short="0", help="With -s, separate dupes with NUL, replace newline with two NULs")]
+    #[structopt(
+        short = "0",
+        help = "With -s, separate dupes with NUL, replace newline with two NULs"
+    )]
     nul: bool,
-    #[structopt(short="f", help="Check only filenames matching this pattern", group="patterns")]
+    #[structopt(
+        short = "f",
+        help = "Check only filenames matching this pattern",
+        group = "patterns"
+    )]
     pattern: Option<Pattern>,
-    #[structopt(short="F", help="Check only filenames matching this regexp", group="patterns")]
+    #[structopt(
+        short = "F",
+        help = "Check only filenames matching this regexp",
+        group = "patterns"
+    )]
     regexp: Option<Regex>,
-    #[structopt(help="Root directory or directories to search")]
+    #[structopt(help = "Root directory or directories to search")]
     roots: Vec<PathBuf>,
 }
 
 fn is_hidden_file(entry: &DirEntry) -> bool {
-    entry.file_name()
+    entry
+        .file_name()
         .to_str()
         .map(|s| s.starts_with("."))
         .unwrap_or(false)
 }
 
 fn main() {
-    let Args { minsize, maxsize, verbose, singleline, grandtotal, nohidden,
-               nonrecursive, nul, pattern, regexp, roots } = Args::from_args();
+    let Args {
+        minsize,
+        maxsize,
+        verbose,
+        singleline,
+        grandtotal,
+        nohidden,
+        nonrecursive,
+        nul,
+        pattern,
+        regexp,
+        roots,
+    } = Args::from_args();
     let maxsize = maxsize.unwrap_or(u64::max_value());
 
     enum Select {
@@ -256,13 +312,16 @@ fn main() {
         let hashref = &mut hashes;
         scope.execute(move || {
             for (size, path, hash) in rx.iter() {
-                hashref.entry((size, hash)).or_insert_with(Vec::new).push(path);
+                hashref
+                    .entry((size, hash))
+                    .or_insert_with(Vec::new)
+                    .push(path);
             }
         });
 
         enum Found {
             One(PathBuf),
-            Multiple
+            Multiple,
         }
 
         // Processing a single file entry, with the "sizes" hashmap collecting
@@ -290,7 +349,11 @@ fn main() {
 
         // The main thread just walks and filters the directory tree.  Symlinks
         // are uninteresting and ignored.
-        let roots = if roots.is_empty() { vec![".".into()] } else { roots };
+        let roots = if roots.is_empty() {
+            vec![".".into()]
+        } else {
+            roots
+        };
         for root in roots {
             let walkdir = if nonrecursive {
                 WalkDir::new(root).max_depth(1).follow_links(false)
@@ -306,7 +369,9 @@ fn main() {
                                     let fsize = meta.len();
                                     if fsize >= minsize && fsize <= maxsize {
                                         if check_inode(&mut inodes, &meta) {
-                                            if !hidden_excluded(&dir_entry) && matches_pattern(&dir_entry) {
+                                            if !hidden_excluded(&dir_entry)
+                                                && matches_pattern(&dir_entry)
+                                            {
                                                 process(fsize, dir_entry);
                                             }
                                         }
